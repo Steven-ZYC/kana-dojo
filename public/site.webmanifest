@@ -1,0 +1,19 @@
+{
+  "name": "かな道场｜日语五十音练习",
+  "short_name": "かな道场",
+  "description": "平假名、片假名、浊音、双向测验与日语打字训练。",
+  "lang": "zh-CN",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f6f3ed",
+  "theme_color": "#e15440",
+  "icons": [
+    {
+      "src": "/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
