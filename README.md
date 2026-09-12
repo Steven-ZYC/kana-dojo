@@ -2,7 +2,7 @@
 
 一个面向中文学习者的日语假名学习网站。通过五十音记忆表、可定制的双向测验和日语输入训练，帮助学习者把平假名、片假名与浊音练成直觉。
 
-线上地址：[kana-dojo.stevenzhang.top](https://kana-dojo.stevenzhang.top/)
+**[立即开始练习](https://kana-dojo.stevenzhang.top/)**
 
 ## 功能
 
@@ -22,26 +22,35 @@
 - [Lucide](https://lucide.dev/) 图标
 - 原生 CSS 响应式布局
 
-## 本地开发
+## 本地运行
 
-需要 Node.js 22.13 或更高版本。
+需要 Node.js 22.13+ 和 npm。
 
 ```bash
-npm install
+git clone https://github.com/Steven-ZYC/kana-dojo.git
+cd kana-dojo
+npm ci
 npm run dev
 ```
 
-生产构建：
+访问终端显示的本地地址，通常为 `http://127.0.0.1:5173/`。
+
+质量检查：
+
+```bash
+npm run check
+```
+
+生产构建与预览：
 
 ```bash
 npm run build
 npm run preview
 ```
 
-其他脚本：
+自动格式化：
 
 ```bash
-npm run lint
 npm run format
 ```
 
@@ -51,6 +60,7 @@ npm run format
 ├─ public/              # favicon、robots、sitemap 与 Web App 清单
 ├─ src/
 │  ├─ App.vue           # 假名数据、学习模式与全部交互
+│  ├─ env.d.ts           # Vue 单文件组件类型声明
 │  ├─ main.ts           # Vue 入口
 │  └─ style.css         # 主题、响应式布局与组件样式
 ├─ index.html           # 页面元信息与结构化数据
@@ -71,4 +81,12 @@ npm run format
 
 ## 数据与隐私
 
-学习进度、主题偏好和练习状态均在浏览器本地运行；项目不要求注册账号，也不会上传练习内容。
+Kana Dojo 不需要账号，也不会把练习内容上传到服务器。所有测验和打字计算均在浏览器中完成。
+
+目前只有主题偏好保存在浏览器本地；刷新或关闭页面后，本轮成绩和练习状态不会保留。
+
+## 当前限制
+
+- 打字练习目前包含 5 个示例句子。
+- 成绩和练习进度不会跨会话保存。
+- Web App manifest 已配置，但暂不支持离线使用。

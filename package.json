@@ -10,18 +10,21 @@
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview",
     "lint": "oxlint src",
-    "format": "oxfmt"
+    "format": "oxfmt",
+    "format:check": "oxfmt --check .",
+    "check": "npm run format:check && npm run lint && npm run build"
   },
   "dependencies": {
-    "vue": "3.5.21",
-    "lucide-vue-next": "0.468.0"
+    "@lucide/vue": "1.45.0",
+    "vue": "3.5.21"
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "6.0.8",
     "oxfmt": "0.61.0",
     "oxlint": "1.76.0",
+    "oxlint-tsgolint": "7.0.2001",
     "typescript": "5.9.3",
-    "vite": "8.0.13",
+    "vite": "8.3.0",
     "vue-tsc": "3.0.8"
   },
   "type": "module"
