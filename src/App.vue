@@ -17,11 +17,22 @@ import {
   Trophy,
   X,
 } from '@lucide/vue'
+import {
+  MISTAKE_BOOK_STORAGE_KEY,
+  createMistakeId,
+  parseMistakeBook,
+  recordMistake,
+  recordReviewSuccess,
+  serializeMistakeBook,
+  type MistakeRecord,
+} from './mistakeBook'
 
 type Section = 'memory' | 'quiz' | 'typing'
 type ScriptKind = 'hira' | 'kata'
 type KanaCategory = 'basic' | 'voiced'
 type QuizMode = 'kana-romaji' | 'romaji-kana'
+type QuizSource = 'regular' | 'round-review' | 'notebook-review'
+type QuizView = 'practice' | 'mistake-book'
 type TypingMode = 'practice' | 'challenge'
 type KanaTuple = [string, string, string, string[]?]
 
@@ -55,6 +66,32 @@ type QuizQuestion = {
 type QuizFeedback = {
   correct: boolean
   expected: string
+  mistakeCount?: number
+  reviewCorrectStreak?: number
+  mastered?: boolean
+}
+
+type ReviewQuestion = {
+  question: QuizQuestion
+  mode: QuizMode
+}
+
+type RoundMistake = ReviewQuestion & {
+  id: string
+  answer: string
+  expected: string
+}
+
+type RoundMistakeSummary = RoundMistake & {
+  occurrences: number
+}
+
+type MistakeDisplay = MistakeRecord & {
+  item: KanaItem
+  prompt: string
+  expected: string
+  modeLabel: string
+  scriptLabel: string
 }
 
 type SentenceSegment = {
@@ -201,6 +238,15 @@ const quizScore = ref(0)
 const quizStreak = ref(0)
 const bestStreak = ref(0)
 const quizFinished = ref(false)
+const quizQuestionTotal = ref(10)
+const quizSource = ref<QuizSource>('regular')
+const quizView = ref<QuizView>('practice')
+const currentQuestionMode = ref<QuizMode>('kana-romaji')
+const reviewQueue = ref<ReviewQuestion[]>([])
+const roundMistakes = ref<RoundMistake[]>([])
+const mistakeRecords = ref<MistakeRecord[]>([])
+const mistakeStorageAvailable = ref(true)
+const showMasteredMistakes = ref(false)
 const quizInput = ref<HTMLInputElement | null>(null)
 const typingInput = ref<HTMLTextAreaElement | null>(null)
 let lastQuestionKey = ''
@@ -216,10 +262,182 @@ const poolSize = computed(() => practicePool.value.length * selectedScripts.valu
 const quizAccuracy = computed(() =>
   quizAnswered.value ? Math.round((quizScore.value / quizAnswered.value) * 100) : 100,
 )
-const questionNumber = computed(() => Math.min(quizAnswered.value + 1, 10))
+const questionNumber = computed(() =>
+  Math.min(quizAnswered.value + 1, quizQuestionTotal.value),
+)
+const quizResultTitle = computed(() =>
+  quizAccuracy.value >= 90
+    ? '太漂亮了！'
+    : quizAccuracy.value >= 70
+      ? '节奏不错！'
+      : '再来一轮就会更稳',
+)
+const activeMistakeCount = computed(
+  () => mistakeRecords.value.filter((record) => !record.mastered).length,
+)
+const masteredMistakeCount = computed(
+  () => mistakeRecords.value.filter((record) => record.mastered).length,
+)
+const mistakeDisplays = computed<MistakeDisplay[]>(() =>
+  mistakeRecords.value
+    .map(toMistakeDisplay)
+    .filter((record): record is MistakeDisplay => Boolean(record))
+    .sort(
+      (a, b) =>
+        Number(a.mastered) - Number(b.mastered) ||
+        b.wrongCount - a.wrongCount ||
+        b.lastWrongAt.localeCompare(a.lastWrongAt),
+    ),
+)
+const visibleMistakeDisplays = computed(() =>
+  showMasteredMistakes.value
+    ? mistakeDisplays.value
+    : mistakeDisplays.value.filter((record) => !record.mastered),
+)
+const highFrequencyMistakes = computed(() =>
+  mistakeDisplays.value.filter((record) => !record.mastered).slice(0, 10),
+)
+const roundMistakeSummary = computed<RoundMistakeSummary[]>(() => {
+  const summaries = new Map<string, RoundMistakeSummary>()
+  for (const mistake of roundMistakes.value) {
+    const existing = summaries.get(mistake.id)
+    if (existing) {
+      existing.occurrences += 1
+      existing.answer = mistake.answer
+    } else {
+      summaries.set(mistake.id, { ...mistake, occurrences: 1 })
+    }
+  }
+  return [...summaries.values()].sort((a, b) => b.occurrences - a.occurrences)
+})
+const quizFeedbackMessage = computed(() => {
+  const feedback = quizFeedback.value
+  if (!feedback) return ''
+  if (!feedback.correct) {
+    return `正确答案：${feedback.expected} · 已记录到错题本（累计 ${feedback.mistakeCount ?? 1} 次）`
+  }
+  if (feedback.mastered) return '连续答对 2 次，已标记为掌握。'
+  if (feedback.reviewCorrectStreak) {
+    return `复习答对 ${feedback.reviewCorrectStreak}/2，再答对一次即可掌握。`
+  }
+  return '答对了，保持这个节奏。'
+})
 
 function chooseRandom<T>(values: T[]): T {
   return values[Math.floor(Math.random() * values.length)]
+}
+
+function toMistakeDisplay(record: MistakeRecord): MistakeDisplay | null {
+  const item = allItems.find((candidate) => candidate.key === record.itemKey)
+  if (!item) return null
+  return {
+    ...record,
+    item,
+    prompt: record.mode === 'kana-romaji' ? item[record.script] : item.roma,
+    expected: record.mode === 'kana-romaji' ? item.roma : item[record.script],
+    modeLabel: record.mode === 'kana-romaji' ? '假名 → 罗马字' : '罗马字 → 假名',
+    scriptLabel: record.script === 'hira' ? '平假名' : '片假名',
+  }
+}
+
+function reviewQuestionFromRecord(record: MistakeRecord): ReviewQuestion | null {
+  const display = toMistakeDisplay(record)
+  return display
+    ? { question: { item: display.item, script: display.script }, mode: display.mode }
+    : null
+}
+
+function persistMistakeBook() {
+  try {
+    localStorage.setItem(
+      MISTAKE_BOOK_STORAGE_KEY,
+      serializeMistakeBook(mistakeRecords.value),
+    )
+    mistakeStorageAvailable.value = true
+  } catch {
+    mistakeStorageAvailable.value = false
+  }
+}
+
+function loadMistakeBook() {
+  try {
+    const storedRecords = parseMistakeBook(
+      localStorage.getItem(MISTAKE_BOOK_STORAGE_KEY),
+    )
+    const validKeys = new Set(allItems.map((item) => item.key))
+    mistakeRecords.value = storedRecords.filter((record) => validKeys.has(record.itemKey))
+    mistakeStorageAvailable.value = true
+  } catch {
+    mistakeRecords.value = []
+    mistakeStorageAvailable.value = false
+  }
+}
+
+function handleMistakeStorage(event: StorageEvent) {
+  if (event.key === MISTAKE_BOOK_STORAGE_KEY) loadMistakeBook()
+}
+
+function openMistakeBook() {
+  quizView.value = 'mistake-book'
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+}
+
+function closeMistakeBook() {
+  quizView.value = 'practice'
+  nextTick(() => quizInput.value?.focus())
+}
+
+function startReview(entries: ReviewQuestion[], source: Exclude<QuizSource, 'regular'>) {
+  if (!entries.length) return
+  reviewQueue.value = [...entries, ...entries]
+  quizSource.value = source
+  quizView.value = 'practice'
+  quizQuestionTotal.value = reviewQueue.value.length
+  quizAnswered.value = 0
+  quizScore.value = 0
+  quizStreak.value = 0
+  quizFinished.value = false
+  quizFeedback.value = null
+  quizAnswer.value = ''
+  roundMistakes.value = []
+  currentQuestion.value = reviewQueue.value[0].question
+  currentQuestionMode.value = reviewQueue.value[0].mode
+  nextTick(() => quizInput.value?.focus())
+}
+
+function startRoundMistakeReview() {
+  const uniqueEntries = roundMistakeSummary.value.map(({ question, mode }) => ({
+    question,
+    mode,
+  }))
+  startReview(uniqueEntries, 'round-review')
+}
+
+function startHighFrequencyReview() {
+  const entries = highFrequencyMistakes.value
+    .map(reviewQuestionFromRecord)
+    .filter((entry): entry is ReviewQuestion => Boolean(entry))
+  startReview(entries, 'notebook-review')
+}
+
+function startSingleMistakeReview(record: MistakeRecord) {
+  const entry = reviewQuestionFromRecord(record)
+  if (entry) startReview([entry], 'notebook-review')
+}
+
+function deleteMistake(record: MistakeRecord) {
+  const display = toMistakeDisplay(record)
+  const label = display ? `${display.prompt} → ${display.expected}` : '这条错题'
+  if (!window.confirm(`确定从错题本删除“${label}”吗？`)) return
+  mistakeRecords.value = mistakeRecords.value.filter((item) => item.id !== record.id)
+  persistMistakeBook()
+}
+
+function formatMistakeDate(value: string) {
+  const date = new Date(value)
+  return Number.isNaN(date.getTime())
+    ? '未知时间'
+    : date.toLocaleDateString('zh-CN', { month: 'short', day: 'numeric' })
 }
 
 function generateQuestion(): QuizQuestion | null {
@@ -240,12 +458,18 @@ function generateQuestion(): QuizQuestion | null {
 }
 
 function resetQuiz() {
+  quizSource.value = 'regular'
+  quizView.value = 'practice'
+  quizQuestionTotal.value = 10
+  reviewQueue.value = []
+  roundMistakes.value = []
   quizAnswered.value = 0
   quizScore.value = 0
   quizStreak.value = 0
   quizFinished.value = false
   quizFeedback.value = null
   quizAnswer.value = ''
+  currentQuestionMode.value = practiceMode.value
   currentQuestion.value = generateQuestion()
   nextTick(() => quizInput.value?.focus())
 }
@@ -278,37 +502,81 @@ function submitQuiz() {
   }
   if (!currentQuestion.value || !quizAnswer.value.trim()) return
 
-  const { item, script } = currentQuestion.value
+  const question = currentQuestion.value
+  const { item, script } = question
+  const submittedAnswer = quizAnswer.value.trim()
+  const mistakeId = createMistakeId(item.key, script, currentQuestionMode.value)
   let correct = false
   let expected = ''
-  if (practiceMode.value === 'kana-romaji') {
+  if (currentQuestionMode.value === 'kana-romaji') {
     const accepted = [item.roma, ...(item.aliases || [])].map(normalizeRomaji)
-    correct = accepted.includes(normalizeRomaji(quizAnswer.value))
+    correct = accepted.includes(normalizeRomaji(submittedAnswer))
     expected = item.roma
   } else {
     expected = item[script]
-    correct = quizAnswer.value.trim() === expected
+    correct = submittedAnswer === expected
   }
 
   quizAnswered.value += 1
+  let mistakeCount: number | undefined
+  let reviewCorrectStreak: number | undefined
+  let mastered: boolean | undefined
   if (correct) {
     quizScore.value += 1
     quizStreak.value += 1
     bestStreak.value = Math.max(bestStreak.value, quizStreak.value)
+    if (quizSource.value !== 'regular') {
+      mistakeRecords.value = recordReviewSuccess(mistakeRecords.value, mistakeId)
+      const updatedRecord = mistakeRecords.value.find((record) => record.id === mistakeId)
+      reviewCorrectStreak = updatedRecord?.reviewCorrectStreak
+      mastered = updatedRecord?.mastered
+      persistMistakeBook()
+    }
   } else {
     quizStreak.value = 0
+    mistakeRecords.value = recordMistake(mistakeRecords.value, {
+      id: mistakeId,
+      itemKey: item.key,
+      script,
+      mode: currentQuestionMode.value,
+      answer: submittedAnswer,
+    })
+    mistakeCount = mistakeRecords.value.find(
+      (record) => record.id === mistakeId,
+    )?.wrongCount
+    roundMistakes.value.push({
+      id: mistakeId,
+      question,
+      mode: currentQuestionMode.value,
+      answer: submittedAnswer,
+      expected,
+    })
+    persistMistakeBook()
   }
-  quizFeedback.value = { correct, expected }
+  quizFeedback.value = {
+    correct,
+    expected,
+    mistakeCount,
+    reviewCorrectStreak,
+    mastered,
+  }
 }
 
 function advanceQuiz() {
-  if (quizAnswered.value >= 10) {
+  if (quizAnswered.value >= quizQuestionTotal.value) {
     quizFinished.value = true
     return
   }
   quizAnswer.value = ''
   quizFeedback.value = null
-  currentQuestion.value = generateQuestion()
+  if (quizSource.value === 'regular') {
+    currentQuestionMode.value = practiceMode.value
+    currentQuestion.value = generateQuestion()
+  } else {
+    const nextEntry = reviewQueue.value[quizAnswered.value]
+    currentQuestion.value = nextEntry.question
+    currentQuestionMode.value = nextEntry.mode
+  }
   nextTick(() => quizInput.value?.focus())
 }
 
@@ -690,6 +958,9 @@ watch(currentSentence, () => {
 })
 
 onMounted(() => {
+  loadMistakeBook()
+  window.addEventListener('storage', handleMistakeStorage)
+
   const storedTheme = loadThemePreference()
   darkMode.value =
     storedTheme === 'dark' ||
@@ -707,6 +978,7 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   stopTimer()
+  window.removeEventListener('storage', handleMistakeStorage)
   webMcpLifecycle?.abort()
 })
 </script>
@@ -848,22 +1120,140 @@ onBeforeUnmount(() => {
             <button class="button secondary full-width" :disabled="poolSize === 0" @click="resetQuiz">
               <RotateCcw :size="17" />按此范围开始新一轮
             </button>
+
+            <div class="mistake-book-summary">
+              <div class="mistake-summary-heading">
+                <span><BookOpen :size="17" /></span>
+                <div>
+                  <strong>错题本</strong>
+                  <small>数据仅保存在此浏览器</small>
+                </div>
+              </div>
+              <div class="mistake-summary-stats">
+                <span><b>{{ activeMistakeCount }}</b> 待掌握</span>
+                <span><b>{{ masteredMistakeCount }}</b> 已掌握</span>
+              </div>
+              <p v-if="!mistakeStorageAvailable" class="storage-warning" role="status">
+                浏览器存储不可用，当前记录只能保留到页面关闭。
+              </p>
+              <button class="button ghost full-width" type="button" @click="openMistakeBook">
+                查看错题本 <ChevronRight :size="16" />
+              </button>
+            </div>
           </aside>
 
           <div class="quiz-stage">
-            <div class="quiz-stats" aria-label="本轮成绩">
-              <div><Target :size="18" /><span>进度</span><strong>{{ quizAnswered }}/10</strong></div>
+            <div v-if="quizView === 'practice'" class="quiz-stats" aria-label="本轮成绩">
+              <div><Target :size="18" /><span>进度</span><strong>{{ quizAnswered }}/{{ quizQuestionTotal }}</strong></div>
               <div><Check :size="18" /><span>正确率</span><strong>{{ quizAccuracy }}%</strong></div>
               <div><Flame :size="18" /><span>连续答对</span><strong>{{ quizStreak }}</strong></div>
             </div>
 
-            <div v-if="quizFinished" class="quiz-card result-card">
+            <div v-if="quizView === 'mistake-book'" class="quiz-card mistake-book-card">
+              <div class="mistake-book-header">
+                <div>
+                  <p class="eyebrow">MISTAKE BOOK · 错题本</p>
+                  <h2>优先攻克高频错题</h2>
+                  <p>同一字符的平假名、片假名和练习方向会分别统计。</p>
+                </div>
+                <button class="button ghost" type="button" @click="closeMistakeBook">返回练习</button>
+              </div>
+
+              <div class="mistake-book-controls">
+                <button
+                  class="button primary"
+                  type="button"
+                  :disabled="highFrequencyMistakes.length === 0"
+                  @click="startHighFrequencyReview"
+                >
+                  <RotateCcw :size="17" />复习高频错题
+                </button>
+                <label class="switch-label">
+                  <input v-model="showMasteredMistakes" type="checkbox" role="switch" />
+                  <span>显示已掌握</span>
+                </label>
+              </div>
+
+              <p v-if="!mistakeStorageAvailable" class="storage-warning" role="status">
+                浏览器存储不可用，当前记录只能保留到页面关闭。
+              </p>
+
+              <div v-if="visibleMistakeDisplays.length" class="mistake-list">
+                <article
+                  v-for="record in visibleMistakeDisplays"
+                  :key="record.id"
+                  class="mistake-entry"
+                  :class="{ mastered: record.mastered }"
+                >
+                  <div class="mistake-entry-main">
+                    <div class="mistake-prompt">
+                      <strong :lang="record.mode === 'kana-romaji' ? 'ja' : 'en'">{{ record.prompt }}</strong>
+                      <ChevronRight :size="18" />
+                      <strong :lang="record.mode === 'kana-romaji' ? 'en' : 'ja'">{{ record.expected }}</strong>
+                    </div>
+                    <div class="mistake-tags">
+                      <span>{{ record.scriptLabel }}</span>
+                      <span>{{ record.modeLabel }}</span>
+                      <span v-if="record.mastered" class="mastered-tag">已掌握</span>
+                    </div>
+                    <p>
+                      累计答错 <b>{{ record.wrongCount }}</b> 次 · 连续复习正确
+                      <b>{{ record.reviewCorrectStreak }}/2</b> · 最近答错
+                      {{ formatMistakeDate(record.lastWrongAt) }}
+                    </p>
+                    <p class="last-wrong-answer">上次错误答案：{{ record.lastWrongAnswer || '（空）' }}</p>
+                  </div>
+                  <div class="mistake-entry-actions">
+                    <button class="button secondary" type="button" @click="startSingleMistakeReview(record)">
+                      练习此题
+                    </button>
+                    <button class="delete-mistake" type="button" :aria-label="`删除错题 ${record.prompt}`" @click="deleteMistake(record)">
+                      删除
+                    </button>
+                  </div>
+                </article>
+              </div>
+
+              <div v-else class="mistake-empty-state">
+                <Trophy :size="32" />
+                <h3>{{ mistakeRecords.length ? '所有错题都已掌握' : '错题本还是空的' }}</h3>
+                <p>{{ mistakeRecords.length ? '可以打开“显示已掌握”回顾历史记录。' : '练习中答错的题目会自动出现在这里。' }}</p>
+              </div>
+            </div>
+
+            <div v-else-if="quizFinished" class="quiz-card result-card" :class="{ 'has-mistakes': roundMistakeSummary.length }">
               <div class="result-medal"><Trophy :size="34" /></div>
               <p class="eyebrow">ROUND COMPLETE</p>
-              <h2>{{ quizScore >= 9 ? '太漂亮了！' : quizScore >= 7 ? '节奏不错！' : '再来一轮就会更稳' }}</h2>
-              <p>本轮答对 <strong>{{ quizScore }}/10</strong>，正确率 <strong>{{ quizAccuracy }}%</strong>。</p>
-              <div class="result-score"><span>{{ quizScore * 10 }}</span><small>POINTS</small></div>
-              <button class="button primary" @click="resetQuiz"><RotateCcw :size="18" />再练一轮</button>
+              <h2>{{ quizResultTitle }}</h2>
+              <p>本轮答对 <strong>{{ quizScore }}/{{ quizQuestionTotal }}</strong>，正确率 <strong>{{ quizAccuracy }}%</strong>。</p>
+              <div class="result-score"><span>{{ quizAccuracy }}</span><small>POINTS</small></div>
+
+              <div v-if="roundMistakeSummary.length" class="round-mistakes">
+                <div class="round-mistakes-heading">
+                  <div><h3>本轮错题</h3><p>已自动保存到当前浏览器的错题本。</p></div>
+                  <strong>{{ roundMistakeSummary.length }}</strong>
+                </div>
+                <div class="round-mistake-list">
+                  <div v-for="mistake in roundMistakeSummary" :key="mistake.id" class="round-mistake-item">
+                    <span :lang="mistake.mode === 'kana-romaji' ? 'ja' : 'en'">
+                      {{ mistake.mode === 'kana-romaji' ? mistake.question.item[mistake.question.script] : mistake.question.item.roma }}
+                    </span>
+                    <ChevronRight :size="16" />
+                    <b :lang="mistake.mode === 'kana-romaji' ? 'en' : 'ja'">{{ mistake.expected }}</b>
+                    <small v-if="mistake.occurrences > 1">错 {{ mistake.occurrences }} 次</small>
+                  </div>
+                </div>
+              </div>
+
+              <div class="result-actions">
+                <button v-if="roundMistakeSummary.length" class="button primary" type="button" @click="startRoundMistakeReview">
+                  <RotateCcw :size="18" />重做本轮错题
+                </button>
+                <button class="button secondary" type="button" @click="openMistakeBook">
+                  <BookOpen :size="18" />查看错题本
+                </button>
+                <button class="button ghost" type="button" @click="resetQuiz">开始普通练习</button>
+              </div>
             </div>
 
             <div v-else-if="currentQuestion" class="quiz-card">
@@ -871,12 +1261,13 @@ onBeforeUnmount(() => {
                 <span>第 {{ questionNumber }} 题</span>
                 <span>{{ currentQuestion.item.rowLabel }}</span>
                 <span>{{ currentQuestion.script === 'hira' ? '平假名' : '片假名' }}</span>
+                <span v-if="quizSource !== 'regular'">错题复习</span>
               </div>
 
               <div class="question-display">
-                <p>{{ practiceMode === 'kana-romaji' ? '请输入对应的罗马字' : '请写成' + (currentQuestion.script === 'hira' ? '平假名' : '片假名') }}</p>
+                <p>{{ currentQuestionMode === 'kana-romaji' ? '请输入对应的罗马字' : '请写成' + (currentQuestion.script === 'hira' ? '平假名' : '片假名') }}</p>
                 <strong lang="ja">
-                  {{ practiceMode === 'kana-romaji'
+                  {{ currentQuestionMode === 'kana-romaji'
                     ? currentQuestion.item[currentQuestion.script]
                     : currentQuestion.item.roma }}
                 </strong>
@@ -889,12 +1280,12 @@ onBeforeUnmount(() => {
                     id="quiz-answer"
                     ref="quizInput"
                     v-model="quizAnswer"
-                    :lang="practiceMode === 'romaji-kana' ? 'ja' : 'en'"
+                    :lang="currentQuestionMode === 'romaji-kana' ? 'ja' : 'en'"
                     inputmode="text"
                     autocapitalize="none"
                     autocomplete="off"
                     :disabled="Boolean(quizFeedback)"
-                    :placeholder="practiceMode === 'kana-romaji' ? '例如：shi' : '使用日语输入法'"
+                    :placeholder="currentQuestionMode === 'kana-romaji' ? '例如：shi' : '使用日语输入法'"
                     @keydown.enter.prevent="submitQuiz"
                   />
                   <span v-if="quizFeedback" class="answer-status" aria-live="polite">
@@ -903,13 +1294,13 @@ onBeforeUnmount(() => {
                   </span>
                 </div>
                 <p v-if="quizFeedback" class="feedback-message" :class="{ success: quizFeedback.correct }" role="status" aria-live="polite">
-                  {{ quizFeedback.correct ? '答对了，保持这个节奏。' : '正确答案：' + quizFeedback.expected }}
+                  {{ quizFeedbackMessage }}
                 </p>
                 <p v-else class="input-hint">按 Enter 提交答案</p>
               </div>
 
               <button class="button primary quiz-submit" :disabled="!quizAnswer.trim() && !quizFeedback" @click="submitQuiz">
-                {{ quizFeedback ? (quizAnswered >= 10 ? '查看成绩' : '下一题') : '确认答案' }}
+                {{ quizFeedback ? (quizAnswered >= quizQuestionTotal ? '查看成绩' : '下一题') : '确认答案' }}
                 <ChevronRight :size="18" />
               </button>
             </div>
