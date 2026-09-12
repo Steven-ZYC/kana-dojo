@@ -16,7 +16,7 @@ import {
   Target,
   Trophy,
   X,
-} from 'lucide-vue-next'
+} from '@lucide/vue'
 
 type Section = 'memory' | 'quiz' | 'typing'
 type ScriptKind = 'hira' | 'kata'
@@ -326,9 +326,25 @@ function openSection(section: Section) {
 function toggleTheme() {
   darkMode.value = !darkMode.value
   document.documentElement.classList.toggle('dark', darkMode.value)
-  localStorage.setItem('kana-theme', darkMode.value ? 'dark' : 'light')
+  saveThemePreference(darkMode.value ? 'dark' : 'light')
   const themeMeta = document.querySelector('meta[name="theme-color"]')
   themeMeta?.setAttribute('content', darkMode.value ? '#101a20' : '#f6f3ed')
+}
+
+function loadThemePreference() {
+  try {
+    return localStorage.getItem('kana-theme')
+  } catch {
+    return null
+  }
+}
+
+function saveThemePreference(theme: 'dark' | 'light') {
+  try {
+    localStorage.setItem('kana-theme', theme)
+  } catch {
+    // Theme changes still apply for the current session when storage is unavailable.
+  }
 }
 
 const typingMode = ref<TypingMode>('practice')
@@ -425,6 +441,7 @@ function startTypingClock() {
   if (!typingStartTime.value) {
     typingStartTime.value = Date.now()
     typingNow.value = typingStartTime.value
+    startTimer()
   }
 }
 
@@ -439,6 +456,7 @@ function handleTypingInput() {
 
 function handleTypingKeydown(event: KeyboardEvent) {
   if (typingMode.value !== 'practice' || typingResult.value) return
+  if (event.isComposing || event.key === 'Process') return
   const key = event.key.toLowerCase()
   if (key === 'backspace') {
     romanProgress.value = Math.max(0, romanProgress.value - 1)
@@ -464,9 +482,11 @@ function finishPractice() {
     elapsed,
     correctChars: counts.matches,
   }
+  stopTimer()
 }
 
 function clearTypingAttempt() {
+  stopTimer()
   typingText.value = ''
   typingStartTime.value = null
   typingResult.value = null
@@ -501,11 +521,12 @@ function startChallenge() {
   challengeTotalChars.value = 0
   typingStartTime.value = Date.now()
   challengeDeadline.value = typingStartTime.value + 60_000
+  startTimer()
   nextTick(() => typingInput.value?.focus())
 }
 
 function completeChallengeSentence() {
-  const length = normalizedTarget.value.length
+  const length = normalizedTyped.value.length
   challengeCorrectChars.value += length
   challengeTotalChars.value += length
   challengeCompleted.value += 1
@@ -515,7 +536,9 @@ function completeChallengeSentence() {
 
 function skipChallengeSentence() {
   if (!challengeRunning.value) return
-  challengeTotalChars.value += normalizedTarget.value.length
+  const partial = bestMatchCounts(normalizedTyped.value)
+  challengeCorrectChars.value += partial.matches
+  challengeTotalChars.value += partial.total
   sentenceIndex.value = (sentenceIndex.value + 1) % sentences.length
   typingText.value = ''
 }
@@ -528,6 +551,7 @@ function finishChallenge() {
   challengeRunning.value = false
   challengeDone.value = true
   challengeRemaining.value = 0
+  stopTimer()
   const elapsed = Math.max(
     0.5,
     (Date.now() - (typingStartTime.value || Date.now())) / 1000,
@@ -540,6 +564,29 @@ function finishChallenge() {
     elapsed,
     correctChars: challengeCorrectChars.value,
   }
+}
+
+function updateTimer() {
+  typingNow.value = Date.now()
+  if (!challengeRunning.value) return
+
+  challengeRemaining.value = Math.max(
+    0,
+    Math.ceil((challengeDeadline.value - typingNow.value) / 1000),
+  )
+  if (challengeRemaining.value <= 0) finishChallenge()
+}
+
+function startTimer() {
+  if (timerId !== undefined) return
+  updateTimer()
+  timerId = window.setInterval(updateTimer, 250)
+}
+
+function stopTimer() {
+  if (timerId === undefined) return
+  window.clearInterval(timerId)
+  timerId = undefined
 }
 
 async function registerWebMcpTool() {
@@ -643,9 +690,10 @@ watch(currentSentence, () => {
 })
 
 onMounted(() => {
+  const storedTheme = loadThemePreference()
   darkMode.value =
-    localStorage.getItem('kana-theme') === 'dark' ||
-    (!localStorage.getItem('kana-theme') &&
+    storedTheme === 'dark' ||
+    (storedTheme === null &&
       window.matchMedia('(prefers-color-scheme: dark)').matches)
   document.documentElement.classList.toggle('dark', darkMode.value)
   document.querySelector('meta[name="theme-color"]')?.setAttribute(
@@ -654,21 +702,11 @@ onMounted(() => {
   )
 
   resetQuiz()
-  timerId = window.setInterval(() => {
-    typingNow.value = Date.now()
-    if (challengeRunning.value) {
-      challengeRemaining.value = Math.max(
-        0,
-        Math.ceil((challengeDeadline.value - typingNow.value) / 1000),
-      )
-      if (challengeRemaining.value <= 0) finishChallenge()
-    }
-  }, 100)
   void registerWebMcpTool()
 })
 
 onBeforeUnmount(() => {
-  if (timerId) window.clearInterval(timerId)
+  stopTimer()
   webMcpLifecycle?.abort()
 })
 </script>
@@ -681,13 +719,13 @@ onBeforeUnmount(() => {
         <span><strong>かな道场</strong><small>KANA DŌJŌ</small></span>
       </button>
       <nav class="primary-nav" aria-label="主要功能">
-        <button :class="{ active: activeSection === 'memory' }" @click="openSection('memory')">
+        <button type="button" :class="{ active: activeSection === 'memory' }" :aria-current="activeSection === 'memory' ? 'page' : undefined" @click="openSection('memory')">
           <BookOpen :size="18" />记忆
         </button>
-        <button :class="{ active: activeSection === 'quiz' }" @click="openSection('quiz')">
+        <button type="button" :class="{ active: activeSection === 'quiz' }" :aria-current="activeSection === 'quiz' ? 'page' : undefined" @click="openSection('quiz')">
           <Dumbbell :size="18" />练习
         </button>
-        <button :class="{ active: activeSection === 'typing' }" @click="openSection('typing')">
+        <button type="button" :class="{ active: activeSection === 'typing' }" :aria-current="activeSection === 'typing' ? 'page' : undefined" @click="openSection('typing')">
           <Keyboard :size="18" />打字
         </button>
       </nav>
@@ -695,6 +733,7 @@ onBeforeUnmount(() => {
         class="icon-button"
         type="button"
         :aria-label="darkMode ? '切换到白天模式' : '切换到夜间模式'"
+        :aria-pressed="darkMode"
         @click="toggleTheme"
       >
         <Sun v-if="darkMode" :size="20" />
@@ -716,9 +755,9 @@ onBeforeUnmount(() => {
         </div>
 
         <div class="chart-toolbar" aria-label="五十音图筛选">
-          <div class="segmented">
-            <button :class="{ active: chartGroup === 'basic' }" @click="chartGroup = 'basic'">清音</button>
-            <button :class="{ active: chartGroup === 'voiced' }" @click="chartGroup = 'voiced'">浊音・半浊音</button>
+          <div class="segmented" role="group" aria-label="五十音类别">
+            <button type="button" :class="{ active: chartGroup === 'basic' }" :aria-pressed="chartGroup === 'basic'" @click="chartGroup = 'basic'">清音</button>
+            <button type="button" :class="{ active: chartGroup === 'voiced' }" :aria-pressed="chartGroup === 'voiced'" @click="chartGroup = 'voiced'">浊音・半浊音</button>
           </div>
           <div class="toolbar-right">
             <label>显示
@@ -746,7 +785,7 @@ onBeforeUnmount(() => {
               <div v-if="cell" class="kana-cell" role="cell">
                 <span v-if="scriptView !== 'kata'" class="kana hira">{{ cell.hira }}</span>
                 <span v-if="scriptView !== 'hira'" class="kana kata">{{ cell.kata }}</span>
-                <span class="romaji" :class="{ hidden: hideRomaji }">{{ cell.roma }}</span>
+                <span class="romaji" :class="{ hidden: hideRomaji }" :aria-hidden="hideRomaji">{{ cell.roma }}</span>
               </div>
               <div v-else class="kana-cell empty" role="cell" aria-hidden="true">·</div>
             </template>
@@ -761,9 +800,9 @@ onBeforeUnmount(() => {
             <p class="eyebrow">PRACTICE · 练习</p>
             <h1 id="quiz-title">双向假名练习</h1>
           </div>
-          <div class="mode-switch" aria-label="练习方向">
-            <button :class="{ active: practiceMode === 'kana-romaji' }" @click="setPracticeMode('kana-romaji')">假名 → 罗马字</button>
-            <button :class="{ active: practiceMode === 'romaji-kana' }" @click="setPracticeMode('romaji-kana')">罗马字 → 假名</button>
+          <div class="mode-switch" role="group" aria-label="练习方向">
+            <button type="button" :class="{ active: practiceMode === 'kana-romaji' }" :aria-pressed="practiceMode === 'kana-romaji'" @click="setPracticeMode('kana-romaji')">假名 → 罗马字</button>
+            <button type="button" :class="{ active: practiceMode === 'romaji-kana' }" :aria-pressed="practiceMode === 'romaji-kana'" @click="setPracticeMode('romaji-kana')">罗马字 → 假名</button>
           </div>
         </div>
 
@@ -863,7 +902,7 @@ onBeforeUnmount(() => {
                     <X v-else :size="20" />
                   </span>
                 </div>
-                <p v-if="quizFeedback" class="feedback-message" :class="{ success: quizFeedback.correct }">
+                <p v-if="quizFeedback" class="feedback-message" :class="{ success: quizFeedback.correct }" role="status" aria-live="polite">
                   {{ quizFeedback.correct ? '答对了，保持这个节奏。' : '正确答案：' + quizFeedback.expected }}
                 </p>
                 <p v-else class="input-hint">按 Enter 提交答案</p>
@@ -890,9 +929,9 @@ onBeforeUnmount(() => {
             <p class="eyebrow">TYPING · 打字</p>
             <h1 id="typing-title">日语输入训练</h1>
           </div>
-          <div class="mode-switch" aria-label="打字训练模式">
-            <button :class="{ active: typingMode === 'practice' }" @click="switchTypingMode('practice')">引导练习</button>
-            <button :class="{ active: typingMode === 'challenge' }" @click="switchTypingMode('challenge')">60 秒挑战</button>
+          <div class="mode-switch" role="group" aria-label="打字训练模式">
+            <button type="button" :class="{ active: typingMode === 'practice' }" :aria-pressed="typingMode === 'practice'" @click="switchTypingMode('practice')">引导练习</button>
+            <button type="button" :class="{ active: typingMode === 'challenge' }" :aria-pressed="typingMode === 'challenge'" @click="switchTypingMode('challenge')">60 秒挑战</button>
           </div>
         </div>
 
@@ -900,7 +939,7 @@ onBeforeUnmount(() => {
           <div class="typing-stage">
             <div class="typing-topline">
               <div class="sentence-count"><span>{{ currentSentence.level }}</span> 第 {{ sentenceIndex + 1 }}/{{ sentences.length }} 句</div>
-              <div v-if="typingMode === 'challenge'" class="challenge-clock" :class="{ urgent: challengeRemaining <= 10 }">
+              <div v-if="typingMode === 'challenge'" class="challenge-clock" :class="{ urgent: challengeRemaining <= 10 }" role="timer" :aria-label="`挑战剩余 ${challengeRemaining} 秒`">
                 <Clock3 :size="18" />00:{{ String(challengeRemaining).padStart(2, '0') }}
               </div>
               <div v-else class="ime-status"><span></span> 日本語入力 ON</div>
