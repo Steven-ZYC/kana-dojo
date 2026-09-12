@@ -81,7 +81,12 @@ npm run format
 
 部署新版本后，请确认 sitemap 能通过规范域名访问，再将站点提交至需要使用的搜索引擎站长平台。
 
-每次向 `main` 分支推送代码时，GitHub Actions 会自动运行质量检查、生成 `dist/`，并上传名为 `kana-dojo-static` 的构建产物。服务器可以下载并解压该 artifact，然后将其中的静态文件发布到网站根目录，无需在生产服务器安装 Node.js 或重新构建。
+每次向 `main` 分支推送代码时，GitHub Actions 会自动运行质量检查、生成 `dist/`，并完成以下发布步骤：
+
+- 上传名为 `kana-dojo-static` 的 Actions artifact，保留 30 天。
+- 创建一个 `deploy-<run number>` GitHub Release，并附上永久保存的 `kana-dojo-static.tar.gz`。
+
+服务器可以通过 GitHub Releases API，或使用 `gh release download --repo Steven-ZYC/kana-dojo --pattern kana-dojo-static.tar.gz` 获取最新版本，解压后将其中的静态文件发布到网站根目录。生产服务器无需安装 Node.js 或重新构建。由于仓库为私有仓库，服务器下载时需要具有仓库读取权限的 GitHub token。
 
 ## 数据与隐私
 

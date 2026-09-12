@@ -1,4 +1,4 @@
-name: CI
+name: CI & Release
 
 on:
   push:
@@ -30,10 +30,42 @@ jobs:
         run: npm run check
 
       - name: Upload static site artifact
-        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         uses: actions/upload-artifact@v4
         with:
           name: kana-dojo-static
           path: dist/
           if-no-files-found: error
           retention-days: 30
+
+  release:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Download static site artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: kana-dojo-static
+          path: dist/
+
+      - name: Package static site
+        run: tar -czf kana-dojo-static.tar.gz -C dist .
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: deploy-${{ github.run_number }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" kana-dojo-static.tar.gz --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" kana-dojo-static.tar.gz \
+              --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Kana Dojo deploy #${GITHUB_RUN_NUMBER}" \
+              --generate-notes
+          fi
